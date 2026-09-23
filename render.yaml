@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: contact-discovery-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt && playwright install --with-deps chromium"
+    startCommand: "python main.py"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PORT
+        value: 10000
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_GUILD_ID
+        sync: false
+      - key: DISCORD_NOTIFICATION_CHANNEL_ID
+        sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: APOLLO_API_KEYS
+        sync: false
+      - key: APOLLO_DAILY_CREDIT_CAP_PER_KEY
+        value: "10"
+      - key: APOLLO_WEEKLY_CREDIT_CAP_PER_KEY
+        value: "50"
+      - key: SMTP_SENDER_DOMAIN
+        value: gmail.com
+      - key: SMTP_TIMEOUT
+        value: "10"

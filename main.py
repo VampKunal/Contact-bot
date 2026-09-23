@@ -1,10 +1,13 @@
 import asyncio
 import logging
+import os
+import datetime
 import discord
 from discord.ext import commands
+from aiohttp import web
 
 from config import config
-from database.db import init_db
+from database.db import init_db, get_pipeline_stats
 
 # Configure logging
 logging.basicConfig(
@@ -62,19 +65,49 @@ class ContactDiscoveryBot(commands.Bot):
             )
         )
         
-        # Start APScheduler for weekly background runs
+        # Start APScheduler for daily background runs
         try:
             from pipeline.scheduler import start_scheduler
             start_scheduler(self)
         except Exception as e:
             logger.error(f"Failed to start scheduler: {e}")
 
+# --- Render Web Service Health Check Server ---
+async def handle_health_check(request):
+    """Health check endpoint for Render Web Service."""
+    try:
+        stats = await get_pipeline_stats()
+        return web.json_response({
+            "status": "online",
+            "service": "Contact Discovery Discord Bot",
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "pipeline_stats": stats
+        })
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+async def start_web_server(port: int = 10000):
+    """Start asynchronous web server for Render port binding."""
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+    app.router.add_get("/health", handle_health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Render Web Service health check listening on port {port}")
 
 async def main():
     if not config.DISCORD_BOT_TOKEN:
         logger.warning("DISCORD_BOT_TOKEN is not set in .env! Please configure your token before launching.")
         return
 
+    # Start healthcheck web server for Render Web Service (binds to PORT env variable)
+    port = int(os.getenv("PORT", "10000"))
+    await start_web_server(port)
+
+    # Start Discord Bot
     bot = ContactDiscoveryBot()
     async with bot:
         await bot.start(config.DISCORD_BOT_TOKEN)
