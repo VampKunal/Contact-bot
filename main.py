@@ -45,15 +45,29 @@ class ContactDiscoveryBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Failed to load extension {cog}: {e}", exc_info=True)
 
-        # 3. Sync Slash Commands
-        if config.DISCORD_GUILD_ID:
-            guild_obj = discord.Object(id=int(config.DISCORD_GUILD_ID))
-            self.tree.copy_global_to(guild=guild_obj)
-            synced = await self.tree.sync(guild=guild_obj)
-            logger.info(f"Synced {len(synced)} slash commands to Guild ID: {config.DISCORD_GUILD_ID}")
-        else:
-            synced = await self.tree.sync()
-            logger.info(f"Synced {len(synced)} global slash commands.")
+        # 3. Sync Slash Commands with graceful fallback
+        try:
+            if config.DISCORD_GUILD_ID:
+                guild_obj = discord.Object(id=int(config.DISCORD_GUILD_ID))
+                self.tree.copy_global_to(guild=guild_obj)
+                synced = await self.tree.sync(guild=guild_obj)
+                logger.info(f"Synced {len(synced)} slash commands to Guild ID: {config.DISCORD_GUILD_ID}")
+            else:
+                synced = await self.tree.sync()
+                logger.info(f"Synced {len(synced)} global slash commands.")
+        except discord.errors.Forbidden as e:
+            logger.warning(
+                f"Guild sync skipped (Missing Access / permissions): {e}. "
+                "Attempting global slash command sync fallback..."
+            )
+            try:
+                synced = await self.tree.sync()
+                logger.info(f"Synced {len(synced)} global slash commands successfully.")
+            except Exception as ex:
+                logger.error(f"Global sync error: {ex}")
+        except Exception as e:
+            logger.error(f"Failed to sync slash commands: {e}")
+
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
