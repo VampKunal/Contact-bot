@@ -89,23 +89,20 @@ class ContactDiscoveryBot(commands.Bot):
 
 # --- Render Web Service Health Check Server ---
 async def handle_health_check(request):
-    """Health check endpoint for Render Web Service."""
-    try:
-        stats = await get_pipeline_stats()
-        return web.json_response({
-            "status": "online",
-            "service": "Contact Discovery Discord Bot",
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "pipeline_stats": stats
-        })
-    except Exception as e:
-        return web.json_response({"status": "error", "message": str(e)}, status=500)
+    """Health check endpoint for Render Web Service (supports GET and HEAD)."""
+    return web.json_response({
+        "status": "online",
+        "service": "Contact Discovery Discord Bot",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    })
 
 async def start_web_server(port: int = 10000):
     """Start asynchronous web server for Render port binding."""
     app = web.Application()
     app.router.add_get("/", handle_health_check)
     app.router.add_get("/health", handle_health_check)
+    app.router.add_head("/", handle_health_check)
+    app.router.add_head("/health", handle_health_check)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -118,14 +115,20 @@ async def main():
         logger.warning("DISCORD_BOT_TOKEN is not set in .env! Please configure your token before launching.")
         return
 
-    # Start healthcheck web server for Render Web Service (binds to PORT env variable)
+    # 1. Initialize SQLite database schema
+    logger.info("Initializing SQLite database...")
+    await init_db()
+    logger.info("Database initialized successfully.")
+
+    # 2. Start healthcheck web server for Render Web Service
     port = int(os.getenv("PORT", "10000"))
     await start_web_server(port)
 
-    # Start Discord Bot
+    # 3. Start Discord Bot
     bot = ContactDiscoveryBot()
     async with bot:
         await bot.start(config.DISCORD_BOT_TOKEN)
+
 
 if __name__ == "__main__":
     try:
