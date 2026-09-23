@@ -1,0 +1,25 @@
+# Environment and Secret keys
+.env
+
+# SQLite Database & Data files
+*.db
+*.db-journal
+*.sqlite3
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

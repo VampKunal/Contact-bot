@@ -1,0 +1,15 @@
+discord.py>=2.3.2
+aiosqlite>=0.20.0
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+playwright>=1.43.0
+beautifulsoup4>=4.12.3
+lxml>=5.2.1
+dnspython>=2.6.1
+aiosmtplib>=3.0.1
+groq>=0.9.0
+google-genai>=0.1.1
+apscheduler>=3.10.4
+aiohttp>=3.9.5
+requests>=2.31.0
