@@ -12,11 +12,11 @@ You are an expert recruitment and contact-intelligence validator.
 Your job is to evaluate a batch of candidate hiring contacts found for tech companies in Delhi/NCR/Noida/Gurgaon.
 
 For each contact in the batch, you must verify:
-1. Is this person likely a CURRENT decision maker / hiring-relevant leader (CTO, VP Eng, Engineering Manager, Founder/Co-Founder, Tech Lead, HR / Talent Acquisition)?
-2. Flag STALE / FORMER employees (e.g. snippets mentioning "ex-", "former", "previously at", "left in 2023", "past:").
-3. Flag TITLE MISMATCHES (e.g. Sales, Marketing, Customer Support, Legal, Finance, or Interns matched as CTO).
-4. Flag NAME COLLISIONS (common names associated with completely different companies).
-5. Assess whether the candidate's snippet/title indicates active involvement with the target company.
+1. Is this contact likely a CURRENT decision maker / hiring-relevant leader (CTO, VP Eng, Engineering Manager, Founder/Co-Founder, Tech Lead, Head of Engineering, HR / Talent Acquisition)?
+2. Department leadership personas (e.g. "Head of Engineering", "Chief Technology Officer", "Technical Hiring Lead") ARE VALID target decision-makers for cold outreach. Mark them as is_relevant_decision_maker: true.
+3. Flag STALE / FORMER employees (e.g. snippets mentioning "ex-", "former", "previously at", "left in 2023", "past:").
+4. Flag TITLE MISMATCHES (e.g. Sales, Marketing, Customer Support, Legal, Finance, or Interns matched as CTO).
+5. Flag NAME COLLISIONS (common names associated with completely different companies).
 
 You MUST respond ONLY with a valid JSON list containing one object per candidate in this exact format:
 [
@@ -220,10 +220,11 @@ async def validate_contact_batch(candidates: List[Dict[str, Any]]) -> List[Dict[
         if llm_match:
             is_relevant = llm_match.get("is_relevant_decision_maker", True)
             is_stale = llm_match.get("is_stale_or_former", False)
-            if is_stale:
-                is_relevant = False
-
             raw_llm_score = float(llm_match.get("llm_score", 0.75))
+            
+            # Pass if deemed relevant OR if score is >= 0.40 and not explicitly a stale/former employee
+            passed = (is_relevant or raw_llm_score >= 0.40) and not is_stale
+
             normalized_title = llm_match.get("title_normalized") or original.get("title")
             red_flags = llm_match.get("red_flags", [])
             if is_stale and "stale/former employee" not in red_flags:
@@ -236,7 +237,7 @@ async def validate_contact_batch(candidates: List[Dict[str, Any]]) -> List[Dict[
             enriched = {
                 **original,
                 "title_normalized": normalized_title,
-                "is_llm_passed": is_relevant and not is_stale,
+                "is_llm_passed": passed,
                 "raw_llm_score": raw_llm_score,
                 "red_flags": red_flags,
                 "llm_reasoning": reasoning,

@@ -28,7 +28,10 @@ IGNORED_DOMAINS = {
     "google.com", "maps.google.com", "youtube.com", "medium.com", "github.com",
     "glassdoor.co.in", "glassdoor.com", "indeed.com", "naukri.com", "ambitionbox.com",
     "wikipedia.org", "techcrunch.com", "inc42.com", "yourstory.com", "economictimes.indiatimes.com",
-    "quora.com", "reddit.com", "f6s.com", "crunchbase.com", "wellfound.com", "angellist.com"
+    "quora.com", "reddit.com", "f6s.com", "crunchbase.com", "wellfound.com", "angellist.com",
+    "seedtable.com", "designrush.com", "topdevelopers.co", "builtin.com", "builtindelhi.in",
+    "failory.com", "techlist.ai", "nobroker.in", "akoode.com", "clutch.co", "g2.com", "capterra.com",
+    "themanifest.com", "goodfirms.co", "upwork.com", "fiverr.com", "marketmystique.com", "appfutura.com"
 }
 
 def clean_domain(url: str) -> Optional[str]:

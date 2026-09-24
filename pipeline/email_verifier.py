@@ -48,10 +48,10 @@ async def verify_smtp_mailbox(
     timeout: int = None
 ) -> Tuple[bool, str]:
     """
-    Verify if an email mailbox exists via DNS MX lookup and SMTP handshake.
+    Verify if an email mailbox exists via DNS MX lookup and SMTP handshake with fast 3s fail-safe timeout.
     Returns: (is_valid: bool, reason: str)
     """
-    timeout = timeout or config.SMTP_TIMEOUT
+    timeout = timeout or 3
     sender_domain = config.SMTP_SENDER_DOMAIN or "gmail.com"
     sender_email = f"verify@{sender_domain}"
 

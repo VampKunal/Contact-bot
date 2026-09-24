@@ -198,6 +198,29 @@ async def get_company_by_id(company_id: int) -> Optional[Dict[str, Any]]:
     finally:
         await db.close()
 
+async def get_uncontacted_companies(limit: int = 10, region: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch companies that currently have zero contacts, or least recently contacted."""
+    db = await get_db_connection()
+    try:
+        query = """
+            SELECT comp.*, (SELECT COUNT(*) FROM contacts WHERE company_id = comp.id) as contact_count
+            FROM companies comp
+            WHERE 1=1
+        """
+        params = []
+        if region:
+            query += " AND comp.region LIKE ?"
+            params.append(f"%{region}%")
+        
+        query += " ORDER BY contact_count ASC, comp.tier ASC, comp.id DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
 async def get_companies(region: Optional[str] = None, tier: Optional[int] = None) -> List[Dict[str, Any]]:
     db = await get_db_connection()
     try:

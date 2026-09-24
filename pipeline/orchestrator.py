@@ -10,6 +10,7 @@ from pipeline.llm_validator import validate_contact_batch, calculate_calibrated_
 from pipeline.apollo_client import search_apollo_decision_makers, query_apollo_for_company
 from database.db import (
     get_companies,
+    get_uncontacted_companies,
     add_company,
     add_contact,
     get_pipeline_stats,
@@ -22,14 +23,27 @@ logger = logging.getLogger("pipeline_orchestrator")
 
 DEFAULT_SEED_COMPANIES = [
     {"name": "Sarvam AI", "domain": "sarvam.ai", "region": "Gurgaon", "tier": 1, "tech_stack": "GenAI, LLMs, Python"},
-    {"name": "Krutrim", "domain": "olakrutrim.com", "region": "Delhi NCR / Bengaluru", "tier": 1, "tech_stack": "AI, Cloud, Python"},
+    {"name": "Krutrim", "domain": "olakrutrim.com", "region": "Delhi NCR", "tier": 1, "tech_stack": "AI, Cloud, Python"},
     {"name": "Sprinklr", "domain": "sprinklr.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Java, React, Next.js, AI"},
     {"name": "Innefu Labs", "domain": "innefu.com", "region": "Delhi NCR", "tier": 1, "tech_stack": "AI, Data Analytics"},
     {"name": "MakeMyTrip", "domain": "makemytrip.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Java, Python, React, Microservices"},
     {"name": "Zomato", "domain": "zomato.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, Node.js, React, Go"},
     {"name": "Paytm", "domain": "paytm.com", "region": "Noida", "tier": 1, "tech_stack": "Java, Node.js, React, Cloud"},
     {"name": "Urban Company", "domain": "urbancompany.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Node.js, React, Python, FastAPI"},
-    {"name": "Moglix", "domain": "moglix.com", "region": "Noida", "tier": 1, "tech_stack": "Java, Python, React, Cloud"}
+    {"name": "Moglix", "domain": "moglix.com", "region": "Noida", "tier": 1, "tech_stack": "Java, Python, React, Cloud"},
+    {"name": "BharatPe", "domain": "bharatpe.com", "region": "Delhi NCR", "tier": 1, "tech_stack": "FinTech, React, Node.js, Python"},
+    {"name": "Shiprocket", "domain": "shiprocket.in", "region": "Delhi NCR", "tier": 1, "tech_stack": "Logistics Tech, Python, React"},
+    {"name": "Cars24", "domain": "cars24.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, React, Node.js, AI"},
+    {"name": "PolicyBazaar", "domain": "policybazaar.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Java, Python, React, Cloud"},
+    {"name": "Delhivery", "domain": "delhivery.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, Go, React, Microservices"},
+    {"name": "Pine Labs", "domain": "pinelabs.com", "region": "Noida", "tier": 1, "tech_stack": "FinTech, Java, React, Cloud"},
+    {"name": "Bobble AI", "domain": "bobble.ai", "region": "Gurgaon", "tier": 1, "tech_stack": "GenAI, NLP, Python, Android"},
+    {"name": "Yellow.ai", "domain": "yellow.ai", "region": "Delhi NCR", "tier": 1, "tech_stack": "Conversational AI, Python, Node.js"},
+    {"name": "Spinny", "domain": "spinny.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, Django, React, Node.js"},
+    {"name": "OfBusiness", "domain": "ofbusiness.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Java, Spring, React, Cloud"},
+    {"name": "Pristyn Care", "domain": "pristyncare.com", "region": "Gurgaon", "tier": 1, "tech_stack": "HealthTech, Python, React"},
+    {"name": "Zepto", "domain": "zeptonow.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Quick Commerce, Node.js, Python, React"},
+    {"name": "Blinkit", "domain": "blinkit.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, Go, React, Distributed Systems"}
 ]
 
 # Global run state for /health and /status
@@ -76,11 +90,13 @@ async def run_full_pipeline(region_filter: Optional[str] = None) -> Dict[str, An
 
     logger.info(f"Discovered {len(new_comps)} new companies; Apollo returned {len(apollo_contacts)} parallel leads.")
 
-    # Target active companies from DB
-    target_companies = await get_companies(region=region_filter)
+    # 2. Ensure all high-priority seed companies are in DB
+    for c in DEFAULT_SEED_COMPANIES:
+        await add_company(name=c["name"], domain=c["domain"], region=c["region"], tier=c["tier"], tech_stack_match=c["tech_stack"])
+
+    # Target uncontacted companies from DB to ensure fresh leads every cycle
+    target_companies = await get_uncontacted_companies(limit=6, region=region_filter)
     if not target_companies:
-        for c in DEFAULT_SEED_COMPANIES:
-            await add_company(name=c["name"], domain=c["domain"], region=c["region"], tier=c["tier"], tech_stack_match=c["tech_stack"])
         target_companies = await get_companies(region=region_filter)
 
     funnel["companies_searched"] = min(len(target_companies), 6)
