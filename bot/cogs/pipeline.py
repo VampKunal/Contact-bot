@@ -87,11 +87,10 @@ class PipelineCog(commands.Cog):
                 embed.add_field(name="🎯 Latest Contacts Ready for Review", value="\n\n".join(preview_cards), inline=False)
 
             embed.set_footer(text="Run /pending to review all candidate leads with 1-click Approve buttons.")
-            await interaction.channel.send(embed=embed)
-
+            await interaction.followup.send(embed=embed)
 
         except Exception as e:
-            await interaction.channel.send(f"❌ Pipeline failed with error: `{str(e)}`")
+            await interaction.followup.send(f"❌ Pipeline failed with error: `{str(e)}`")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PipelineCog(bot))

@@ -26,10 +26,51 @@ def is_hiring_relevant_title(title: str) -> bool:
     t_lower = title.lower()
     return any(k in t_lower for k in TARGET_ROLE_KEYWORDS)
 
+async def scrape_path(session: aiohttp.ClientSession, url: str, domain: str) -> List[Dict[str, str]]:
+    """Helper to scrape a single webpage for leadership contacts with fast timeout."""
+    results = []
+    try:
+        async with session.get(url, ssl=False, timeout=4) as resp:
+            if resp.status != 200:
+                return []
+            html = await resp.text()
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Look for team card structures
+            for card in soup.find_all(["div", "section", "article", "li"], class_=re.compile(r"(team|member|leader|person|bio|profile|executive)", re.I)):
+                text_blocks = [t.strip() for t in card.stripped_strings if len(t.strip()) > 1]
+                if len(text_blocks) >= 2:
+                    name_candidate = text_blocks[0]
+                    title_candidate = text_blocks[1]
+                    
+                    if 2 <= len(name_candidate.split()) <= 4 and is_hiring_relevant_title(title_candidate):
+                        results.append({
+                            "name": name_candidate,
+                            "title": title_candidate,
+                            "source": "scraped_website",
+                            "snippet": f"Found on team page {url}: {name_candidate} - {title_candidate}"
+                        })
+
+            # Search for mailto links on the page
+            for mailto in soup.select("a[href^='mailto:']"):
+                href = mailto.get("href", "")
+                email_found = href.replace("mailto:", "").split("?")[0].strip()
+                if "@" in email_found and domain in email_found:
+                    name_text = mailto.get_text().strip() or "Team Contact"
+                    results.append({
+                        "name": name_text,
+                        "title": "Engineering / Talent Contact",
+                        "email": email_found,
+                        "source": "scraped_website",
+                        "snippet": f"Official mailto on {url}: {email_found}"
+                    })
+    except Exception as e:
+        logger.debug(f"Scraping error on {url}: {e}")
+    return results
+
 async def scrape_company_website(domain: str) -> List[Dict[str, str]]:
     """
-    Scrape /about, /team, /careers, /leadership pages of a company website.
-    Extracts candidate names and titles using BeautifulSoup with resilient retry logic.
+    Scrape /about, /team, /careers, /leadership pages of a company website concurrently.
     """
     candidates = []
     headers = {
@@ -37,53 +78,15 @@ async def scrape_company_website(domain: str) -> List[Dict[str, str]]:
     }
 
     base_url = f"https://{domain.rstrip('/')}"
-    paths = ["", "/about", "/team", "/about-us", "/people", "/leadership", "/careers"]
+    paths = ["/team", "/leadership", "/about", "/careers"]
 
-    timeout = aiohttp.ClientTimeout(total=8)
+    timeout = aiohttp.ClientTimeout(total=5)
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-        for path in paths:
-            target_url = f"{base_url}{path}"
-            try:
-                async with session.get(target_url, ssl=False) as resp:
-                    if resp.status != 200:
-                        continue
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, "html.parser")
-
-                    # Look for team card structures
-                    for card in soup.find_all(["div", "section", "article", "li"], class_=re.compile(r"(team|member|leader|person|bio|profile|executive)", re.I)):
-                        text_blocks = [t.strip() for t in card.stripped_strings if len(t.strip()) > 1]
-                        if len(text_blocks) >= 2:
-                            name_candidate = text_blocks[0]
-                            title_candidate = text_blocks[1]
-                            
-                            # Clean and validate name & title
-                            if 2 <= len(name_candidate.split()) <= 4 and is_hiring_relevant_title(title_candidate):
-                                candidates.append({
-                                    "name": name_candidate,
-                                    "title": title_candidate,
-                                    "source": "scraped_website",
-                                    "snippet": f"Found on team page {target_url}: {name_candidate} - {title_candidate}"
-                                })
-
-                    # Also search for mailto links on the page
-                    for mailto in soup.select("a[href^='mailto:']"):
-                        href = mailto.get("href", "")
-                        email_found = href.replace("mailto:", "").split("?")[0].strip()
-                        if "@" in email_found and domain in email_found:
-                            name_text = mailto.get_text().strip() or "Team Contact"
-                            candidates.append({
-                                "name": name_text,
-                                "title": "Engineering / Talent Contact",
-                                "email": email_found,
-                                "source": "scraped_website",
-                                "snippet": f"Official mailto on {target_url}: {email_found}"
-                            })
-
-            except Exception as e:
-                logger.debug(f"Scraping error on {target_url}: {e}")
-            
-            await asyncio.sleep(0.3)
+        tasks = [scrape_path(session, f"{base_url}{p}", domain) for p in paths]
+        page_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in page_results:
+            if isinstance(res, list):
+                candidates.extend(res)
 
     return candidates
 

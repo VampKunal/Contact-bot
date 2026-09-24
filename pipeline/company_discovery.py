@@ -154,15 +154,13 @@ async def scrape_companies_via_web_search(query: str, region_name: str) -> List[
 
 async def run_company_discovery(region_filter: Optional[str] = None) -> Dict[str, Any]:
     """
-    Run autonomous company discovery across target regions.
-    Uses free web crawling queries to discover new tech companies.
+    Fast, concurrent autonomous company discovery across target regions.
     """
     regions = await get_regions(active_only=True)
     if region_filter:
         regions = [r for r in regions if r["name"].lower() == region_filter.lower()]
 
-    all_discovered = []
-
+    tasks = []
     for r in regions:
         region_name = r["name"]
         prompts = [
@@ -170,11 +168,14 @@ async def run_company_discovery(region_filter: Optional[str] = None) -> Dict[str
             f"fastest growing tech companies in {region_name}",
             f"software product startups {region_name}"
         ]
-
         for query in prompts:
-            found = await scrape_companies_via_web_search(query, region_name)
-            all_discovered.extend(found)
-            await asyncio.sleep(1)
+            tasks.append(scrape_companies_via_web_search(query, region_name))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    all_discovered = []
+    for res in results:
+        if isinstance(res, list):
+            all_discovered.extend(res)
 
     return {
         "total_new_companies": len(all_discovered),
