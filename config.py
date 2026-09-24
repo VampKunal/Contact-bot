@@ -60,6 +60,21 @@ class Config:
     SMTP_TIMEOUT: int = int(os.getenv("SMTP_TIMEOUT", "10"))
 
 
+    # Pipeline & Scheduling Settings
+    SCHEDULE_CRON_HOUR: int = int(os.getenv("SCHEDULE_CRON_HOUR", "3"))  # 03:30 UTC = 9:00 AM IST
+    SCHEDULE_CRON_MINUTE: int = int(os.getenv("SCHEDULE_CRON_MINUTE", "30"))
+
+    # Deduplication & Exclusions
+    @property
+    def EXCLUDED_EMAILS(self) -> set[str]:
+        """Set of emails to exclude from discovery (e.g. personal, previously emailed)."""
+        raw = os.getenv("EXCLUDED_EMAILS", "")
+        emails = {e.strip().lower() for e in raw.split(",") if e.strip()}
+        # Always exclude personal candidate email
+        emails.add("kunalrai72899@gmail.com")
+        emails.add("vampkunal@gmail.com")
+        return emails
+
     # User Profile for Outreach
     CANDIDATE_NAME: str = "Kunal Rai"
     CANDIDATE_PROFILE: str = (

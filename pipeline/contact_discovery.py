@@ -5,7 +5,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 from typing import List, Dict, Any, Optional
 from config import config
-from pipeline.email_guesser import generate_email_permutations
+from pipeline.email_guesser import generate_email_permutations, detect_pattern
 from pipeline.email_verifier import verify_smtp_mailbox
 
 logger = logging.getLogger("contact_discovery")
@@ -15,7 +15,8 @@ TARGET_ROLE_KEYWORDS = [
     "cto", "chief technology officer", "head of engineering", "vp of engineering",
     "director of engineering", "engineering manager", "lead engineer", "founding engineer",
     "co-founder", "founder", "hr manager", "talent acquisition", "head of talent",
-    "recruitment lead", "lead recruiter", "technical recruiter", "tech lead"
+    "recruitment lead", "lead recruiter", "technical recruiter", "tech lead",
+    "architect", "principal engineer", "software engineering manager"
 ]
 
 def is_hiring_relevant_title(title: str) -> bool:
@@ -28,7 +29,7 @@ def is_hiring_relevant_title(title: str) -> bool:
 async def scrape_company_website(domain: str) -> List[Dict[str, str]]:
     """
     Scrape /about, /team, /careers, /leadership pages of a company website.
-    Extracts candidate names and titles using BeautifulSoup.
+    Extracts candidate names and titles using BeautifulSoup with resilient retry logic.
     """
     candidates = []
     headers = {
@@ -38,18 +39,19 @@ async def scrape_company_website(domain: str) -> List[Dict[str, str]]:
     base_url = f"https://{domain.rstrip('/')}"
     paths = ["", "/about", "/team", "/about-us", "/people", "/leadership", "/careers"]
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         for path in paths:
             target_url = f"{base_url}{path}"
             try:
-                async with session.get(target_url, timeout=8, ssl=False) as resp:
+                async with session.get(target_url, ssl=False) as resp:
                     if resp.status != 200:
                         continue
                     html = await resp.text()
                     soup = BeautifulSoup(html, "html.parser")
 
                     # Look for team card structures
-                    for card in soup.find_all(["div", "section", "article", "li"], class_=re.compile(r"(team|member|leader|person|bio|profile)", re.I)):
+                    for card in soup.find_all(["div", "section", "article", "li"], class_=re.compile(r"(team|member|leader|person|bio|profile|executive)", re.I)):
                         text_blocks = [t.strip() for t in card.stripped_strings if len(t.strip()) > 1]
                         if len(text_blocks) >= 2:
                             name_candidate = text_blocks[0]
@@ -60,7 +62,8 @@ async def scrape_company_website(domain: str) -> List[Dict[str, str]]:
                                 candidates.append({
                                     "name": name_candidate,
                                     "title": title_candidate,
-                                    "source": "scraped_website"
+                                    "source": "scraped_website",
+                                    "snippet": f"Found on team page {target_url}: {name_candidate} - {title_candidate}"
                                 })
 
                     # Also search for mailto links on the page
@@ -71,15 +74,16 @@ async def scrape_company_website(domain: str) -> List[Dict[str, str]]:
                             name_text = mailto.get_text().strip() or "Team Contact"
                             candidates.append({
                                 "name": name_text,
-                                "title": "Team Member",
+                                "title": "Engineering / Talent Contact",
                                 "email": email_found,
-                                "source": "scraped_website"
+                                "source": "scraped_website",
+                                "snippet": f"Official mailto on {target_url}: {email_found}"
                             })
 
             except Exception as e:
                 logger.debug(f"Scraping error on {target_url}: {e}")
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
     return candidates
 
@@ -100,7 +104,6 @@ async def search_linkedin_contacts(
         logger.debug("Google Custom Search credentials not provided. Skipping LinkedIn search.")
         return []
 
-    # Check daily query quota
     from database.db import get_google_search_count_today, increment_google_search_count
     used_today = await get_google_search_count_today()
     if used_today >= 90:
@@ -119,9 +122,10 @@ async def search_linkedin_contacts(
     }
 
     results = []
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
-            async with session.get(url, params=params, timeout=10) as resp:
+            async with session.get(url, params=params) as resp:
                 await increment_google_search_count(1)
                 if resp.status != 200:
                     logger.error(f"Google Custom Search API error {resp.status}")
@@ -132,7 +136,6 @@ async def search_linkedin_contacts(
                 for item in items:
                     title_snippet = item.get("title", "")
                     snippet = item.get("snippet", "")
-                    # LinkedIn titles usually look like: "John Doe - CTO - Acme Corp | LinkedIn"
                     title_clean = title_snippet.replace(" | LinkedIn", "").replace(" - LinkedIn", "")
                     parts = [p.strip() for p in title_clean.split("-")]
                     
@@ -151,70 +154,92 @@ async def search_linkedin_contacts(
 
     return results
 
-
-async def discover_and_verify_contacts(
+async def discover_raw_contacts(
     company_id: int,
     company_name: str,
     domain: str
 ) -> List[Dict[str, Any]]:
     """
-    Run website scrape + LinkedIn search, guess email permutations,
-    and verify candidates via SMTP/MX check.
+    Fast discovery of candidate contacts from website scraping & LinkedIn index.
+    NO slow/risky SMTP checks are performed at this stage (deferred to post-LLM).
     """
     raw_contacts = []
 
-    # 1. Scrape Website
-    scraped = await scrape_company_website(domain)
-    raw_contacts.extend(scraped)
+    # Run website scraping and LinkedIn custom search in parallel
+    scraped_task = scrape_company_website(domain)
+    linkedin_task = search_linkedin_contacts(company_name, domain)
+    scraped, linkedin_leads = await asyncio.gather(scraped_task, linkedin_task, return_exceptions=True)
 
-    # 2. LinkedIn Search via Google Custom Search
-    linkedin_leads = await search_linkedin_contacts(company_name, domain)
-    raw_contacts.extend(linkedin_leads)
+    if isinstance(scraped, list):
+        raw_contacts.extend(scraped)
+    if isinstance(linkedin_leads, list):
+        raw_contacts.extend(linkedin_leads)
 
     # Deduplicate by candidate name
     unique_candidates: Dict[str, Dict[str, Any]] = {}
     for c in raw_contacts:
         name_key = c["name"].strip().lower()
         if name_key not in unique_candidates:
-            unique_candidates[name_key] = c
+            unique_candidates[name_key] = {
+                "company_id": company_id,
+                "company_name": company_name,
+                "domain": domain,
+                "name": c["name"],
+                "title": c.get("title", "Engineering Leader"),
+                "email": c.get("email"),
+                "source": c.get("source", "scraped"),
+                "raw_snippet": c.get("snippet", "")
+            }
 
-    verified_leads = []
+    return list(unique_candidates.values())
 
-    for name_key, candidate in unique_candidates.items():
-        name = candidate["name"]
-        title = candidate.get("title", "Leader")
-        source = candidate.get("source", "scraped")
-        snippet = candidate.get("snippet", "")
+async def verify_survivor_contact_email(
+    candidate: Dict[str, Any],
+    known_domain_pattern: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Perform targeted DNS MX & SMTP verification ONLY on candidates that survived the LLM filter.
+    Learns and returns detected company email patterns.
+    """
+    name = candidate["name"]
+    domain = candidate["domain"]
+    source = candidate.get("source", "scraped")
+    
+    best_email = candidate.get("email")
+    email_is_verified = False
+    detected_pat = None
+    pattern_matched = False
 
-        # Candidate email exists or generate permutations
-        target_email = candidate.get("email")
-        best_email = target_email
-        email_is_verified = False
+    if best_email:
+        is_valid, _ = await verify_smtp_mailbox(best_email)
+        email_is_verified = is_valid
+        detected_pat = detect_pattern(best_email, name)
+        if known_domain_pattern and detected_pat == known_domain_pattern:
+            pattern_matched = True
+    else:
+        # Generate permutations prioritizing known company pattern
+        permutations = generate_email_permutations(name, domain, known_pattern=known_domain_pattern)
+        # Test only top 3 most likely patterns to save IP reputation and time
+        for test_email in permutations[:3]:
+            is_valid, reason = await verify_smtp_mailbox(test_email)
+            if is_valid:
+                best_email = test_email
+                email_is_verified = True
+                detected_pat = detect_pattern(test_email, name)
+                if known_domain_pattern and detected_pat == known_domain_pattern:
+                    pattern_matched = True
+                break
+        
+        # Fallback to top permutation if SMTP timed out / blocked
+        if not best_email and permutations:
+            best_email = permutations[0]
+            if known_domain_pattern:
+                detected_pat = known_domain_pattern
 
-        if not best_email:
-            # Generate permutations and test via SMTP
-            permutations = generate_email_permutations(name, domain)
-            for test_email in permutations[:3]: # Test top 3 most common patterns
-                is_valid, reason = await verify_smtp_mailbox(test_email)
-                if is_valid:
-                    best_email = test_email
-                    email_is_verified = True
-                    break
-        else:
-            is_valid, _ = await verify_smtp_mailbox(best_email)
-            email_is_verified = is_valid
-
-        # Add candidate lead for LLM validation stage
-        verified_leads.append({
-            "company_id": company_id,
-            "company_name": company_name,
-            "domain": domain,
-            "name": name,
-            "title": title,
-            "email": best_email or f"{name.lower().replace(' ', '.')}@{domain}",
-            "source": source if not email_is_verified else "pattern-guess" if not candidate.get("email") else source,
-            "email_verified": email_is_verified,
-            "raw_snippet": snippet
-        })
-
-    return verified_leads
+    return {
+        **candidate,
+        "email": best_email or f"{name.lower().replace(' ', '.')}@{domain}",
+        "email_verified": email_is_verified,
+        "pattern_matched": pattern_matched or bool(known_domain_pattern and detected_pat == known_domain_pattern),
+        "detected_pattern": detected_pat
+    }

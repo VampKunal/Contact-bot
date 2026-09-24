@@ -18,7 +18,7 @@ def clean_name_parts(name: str) -> tuple[str, str]:
 def generate_email_permutations(name: str, domain: str, known_pattern: Optional[str] = None) -> List[str]:
     """
     Generate likely corporate email permutations for a name and domain.
-    If a known pattern is provided (e.g. 'first.last', 'first', 'flast'), prioritize it.
+    If a known pattern is provided (e.g. 'first.last', 'first', 'flast', 'firstlast'), prioritize it at index 0.
     """
     first, last = clean_name_parts(name)
     if not first:
@@ -30,21 +30,34 @@ def generate_email_permutations(name: str, domain: str, known_pattern: Optional[
 
     patterns = []
 
+    # Map pattern name to actual email template
+    pattern_map = {}
     if last:
-        # Standard corporate patterns
-        patterns = [
-            f"{first}.{last}@{clean_dom}",
-            f"{first}{last}@{clean_dom}",
-            f"{f}{last}@{clean_dom}",
-            f"{first}{l}@{clean_dom}",
-            f"{first}_{last}@{clean_dom}",
-            f"{first}@{clean_dom}",
-            f"{last}.{first}@{clean_dom}",
-            f"{last}@{clean_dom}"
-        ]
+        pattern_map = {
+            "first.last": f"{first}.{last}@{clean_dom}",
+            "firstlast": f"{first}{last}@{clean_dom}",
+            "flast": f"{f}{last}@{clean_dom}",
+            "firstl": f"{first}{l}@{clean_dom}",
+            "first_last": f"{first}_{last}@{clean_dom}",
+            "first": f"{first}@{clean_dom}",
+            "last.first": f"{last}.{first}@{clean_dom}",
+            "last": f"{last}@{clean_dom}"
+        }
+        
+        # If a known confirmed pattern exists for this company domain, put it first!
+        if known_pattern and known_pattern in pattern_map:
+            patterns.append(pattern_map[known_pattern])
+
+        # Add all other standard patterns in order of general prevalence
+        standard_order = ["first.last", "flast", "firstlast", "first", "firstl", "first_last", "last.first", "last"]
+        for p in standard_order:
+            val = pattern_map.get(p)
+            if val and val not in patterns:
+                patterns.append(val)
     else:
         patterns = [
             f"{first}@{clean_dom}",
+            f"careers@{clean_dom}",
             f"contact@{clean_dom}",
             f"team@{clean_dom}"
         ]
@@ -60,23 +73,30 @@ def generate_email_permutations(name: str, domain: str, known_pattern: Optional[
     return result
 
 def detect_pattern(known_email: str, name: str) -> Optional[str]:
-    """Detect which pattern an existing valid email follows."""
+    """Detect which corporate pattern an existing valid email follows."""
     first, last = clean_name_parts(name)
-    if not first or not last or "@" not in known_email:
+    if not first or "@" not in known_email:
         return None
     
-    local = known_email.split("@")[0].lower()
+    local = known_email.split("@")[0].lower().strip()
     f = first[0]
-    l = last[0]
+    l = last[0] if last else ""
 
-    if local == f"{first}.{last}":
-        return "first.last"
-    if local == f"{first}{last}":
-        return "firstlast"
-    if local == f"{f}{last}":
-        return "flast"
-    if local == f"{first}{l}":
-        return "firstl"
+    if last:
+        if local == f"{first}.{last}":
+            return "first.last"
+        if local == f"{first}{last}":
+            return "firstlast"
+        if local == f"{f}{last}":
+            return "flast"
+        if local == f"{first}{l}":
+            return "firstl"
+        if local == f"{first}_{last}":
+            return "first_last"
+        if local == f"{last}.{first}":
+            return "last.first"
+        if local == last:
+            return "last"
     if local == first:
         return "first"
     return None

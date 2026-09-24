@@ -87,14 +87,46 @@ class ContactDiscoveryBot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to start scheduler: {e}")
 
+# Global bot instance & start time for health reporting
+bot_instance: Optional[ContactDiscoveryBot] = None
+start_time = datetime.datetime.now(datetime.timezone.utc)
+
 # --- Render Web Service Health Check Server ---
 async def handle_health_check(request):
-    """Health check endpoint for Render Web Service (supports GET and HEAD)."""
-    return web.json_response({
-        "status": "online",
+    """
+    Honest health check endpoint for Render Web Service (supports GET and HEAD).
+    Reports Discord gateway connection, last pipeline run, funnel metrics, and DB stats.
+    """
+    from pipeline.orchestrator import last_pipeline_run
+    
+    is_ready = bool(bot_instance and bot_instance.is_ready())
+    uptime = int((datetime.datetime.now(datetime.timezone.utc) - start_time).total_seconds())
+
+    db_ok = False
+    pending_count = 0
+    try:
+        stats = await get_pipeline_stats()
+        db_ok = True
+        pending_count = stats.get("contacts_pending", 0)
+    except Exception:
+        pass
+
+    status = "healthy" if (is_ready and db_ok) else "starting" if not is_ready else "degraded"
+
+    payload = {
+        "status": status,
         "service": "Contact Discovery Discord Bot",
+        "gateway_connected": is_ready,
+        "discord_user": str(bot_instance.user) if (bot_instance and bot_instance.user) else None,
+        "guilds_count": len(bot_instance.guilds) if (bot_instance and bot_instance.guilds) else 0,
+        "db_connected": db_ok,
+        "pending_leads_count": pending_count,
+        "last_run_timestamp": last_pipeline_run.get("timestamp"),
+        "last_run_funnel": last_pipeline_run.get("funnel"),
+        "uptime_seconds": uptime,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-    })
+    }
+    return web.json_response(payload, status=200 if status != "degraded" else 503)
 
 async def start_web_server(port: int = 10000):
     """Start asynchronous web server for Render port binding."""
@@ -108,9 +140,10 @@ async def start_web_server(port: int = 10000):
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Render Web Service health check listening on port {port}")
+    logger.info(f"Render Web Service honest health check listening on port {port}")
 
 async def main():
+    global bot_instance
     if not config.DISCORD_BOT_TOKEN:
         logger.warning("DISCORD_BOT_TOKEN is not set in .env! Please configure your token before launching.")
         return
@@ -125,9 +158,9 @@ async def main():
     await start_web_server(port)
 
     # 3. Start Discord Bot
-    bot = ContactDiscoveryBot()
-    async with bot:
-        await bot.start(config.DISCORD_BOT_TOKEN)
+    bot_instance = ContactDiscoveryBot()
+    async with bot_instance:
+        await bot_instance.start(config.DISCORD_BOT_TOKEN)
 
 
 if __name__ == "__main__":

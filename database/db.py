@@ -34,9 +34,16 @@ async def init_db():
                 tier INTEGER DEFAULT 2,
                 source TEXT DEFAULT 'manual',
                 tech_stack_match TEXT,
+                email_pattern TEXT,
                 discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+        # Migration: ensure email_pattern column exists if table was created previously
+        try:
+            await db.execute("ALTER TABLE companies ADD COLUMN email_pattern TEXT;")
+        except Exception:
+            pass  # Column already exists
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS contacts (
@@ -54,6 +61,12 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+        # Performance indices
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON contacts(company_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_companies_domain ON companies(domain);")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS apollo_credit_log (
@@ -85,8 +98,6 @@ async def init_db():
             );
         """)
 
-
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS google_search_daily_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,8 +106,6 @@ async def init_db():
                 last_queried_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-
-
 
         # Insert default target regions if empty
         cursor = await db.execute("SELECT COUNT(*) as count FROM regions")
@@ -256,6 +265,49 @@ async def get_pending_contacts(limit: int = 10, offset: int = 0) -> List[Dict[st
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+async def update_company_email_pattern(company_id: int, pattern: str) -> bool:
+    """Store or update the confirmed corporate email pattern for a company."""
+    if not pattern:
+        return False
+    db = await get_db_connection()
+    try:
+        await db.execute(
+            "UPDATE companies SET email_pattern = ? WHERE id = ?",
+            (pattern.strip().lower(), company_id)
+        )
+        await db.commit()
+        return True
+    finally:
+        await db.close()
+
+async def get_company_email_pattern(company_id: int) -> Optional[str]:
+    """Retrieve the confirmed corporate email pattern for a company if known."""
+    db = await get_db_connection()
+    try:
+        cursor = await db.execute("SELECT email_pattern FROM companies WHERE id = ?", (company_id,))
+        row = await cursor.fetchone()
+        return row["email_pattern"] if row and row["email_pattern"] else None
+    finally:
+        await db.close()
+
+async def is_contact_already_seen(email: Optional[str], name: Optional[str] = None, company_id: Optional[int] = None) -> bool:
+    """Comprehensive check to ensure contact has not already been discovered, contacted, approved, or rejected."""
+    if not email and not (name and company_id):
+        return False
+    db = await get_db_connection()
+    try:
+        if email:
+            cursor = await db.execute("SELECT id FROM contacts WHERE LOWER(email) = ?", (email.strip().lower(),))
+            if await cursor.fetchone():
+                return True
+        if name and company_id:
+            cursor = await db.execute("SELECT id FROM contacts WHERE LOWER(name) = ? AND company_id = ?", (name.strip().lower(), company_id))
+            if await cursor.fetchone():
+                return True
+        return False
     finally:
         await db.close()
 

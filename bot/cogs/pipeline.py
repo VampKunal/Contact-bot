@@ -50,25 +50,20 @@ class PipelineCog(commands.Cog):
         try:
             results = await run_full_pipeline(region_filter=region)
             stats = results.get("stats", {})
+            funnel = results.get("funnel", {})
 
             embed = discord.Embed(
                 title="✨ Pipeline Execution Finished",
+                description="End-to-end pipeline run completed successfully. Review the stage funnel below:",
                 color=discord.Color.green(),
                 timestamp=datetime.datetime.now(datetime.timezone.utc)
             )
-            embed.add_field(name="🏢 New Companies Added", value=str(results.get("new_companies_count", 0)), inline=True)
-            embed.add_field(name="👥 Contacts Discovered", value=str(results.get("contacts_discovered_this_run", 0)), inline=True)
-            embed.add_field(name="📬 Verified Emails", value=str(results.get("emails_verified_this_run", 0)), inline=True)
-            
+            embed.add_field(name="🏢 Companies Searched", value=str(funnel.get("companies_searched", 0)), inline=True)
+            embed.add_field(name="👥 Raw Contacts Sourced", value=str(funnel.get("raw_contacts_found", 0)), inline=True)
+            embed.add_field(name="🧠 LLM Filter Passed", value=str(funnel.get("llm_passed", 0)), inline=True)
+            embed.add_field(name="📬 Verified Mailboxes", value=str(funnel.get("smtp_verified", 0)), inline=True)
+            embed.add_field(name="➕ New Leads Added", value=str(funnel.get("leads_added", 0)), inline=True)
             embed.add_field(name="⏳ Pending Review Total", value=str(stats.get("contacts_pending", 0)), inline=True)
-            embed.add_field(name="✅ Total Approved", value=str(stats.get("contacts_approved", 0)), inline=True)
-
-            if results.get("manual_lookup_needed"):
-                embed.add_field(
-                    name="⚠️ Needs Manual Apollo Lookup",
-                    value=", ".join(results["manual_lookup_needed"]),
-                    inline=False
-                )
 
             # Fetch top 3 pending contacts to give immediate actionable preview
             from database.db import get_pending_contacts
@@ -78,18 +73,20 @@ class PipelineCog(commands.Cog):
             if top_pending:
                 preview_cards = []
                 for p in top_pending:
-                    verified_icon = "✅" if p.get("email_verified") else "⚠️"
+                    verified_icon = "✅ Verified" if p.get("email_verified") else "⚠️ Guessed"
+                    conf_val = p.get("llm_confidence")
+                    conf_str = f"{(conf_val * 100):.0f}%" if conf_val is not None else "Unrated"
                     roles = infer_target_hiring_roles(p.get("title_normalized") or p.get("title"), p.get("tech_stack_match"))
                     preview_cards.append(
-                        f"• **{p['name']}** ({p.get('title') or 'Lead'})\n"
+                        f"• **{p['name']}** — *{p.get('title_normalized') or p.get('title') or 'Lead'}*\n"
                         f"  🏢 **Company:** {p.get('company_name')} (`{p.get('company_domain')}`)\n"
-                        f"  📬 **Email:** `{p.get('email')}` ({verified_icon})\n"
+                        f"  📬 **Email:** `{p.get('email')}` ({verified_icon}) • Score: `{conf_str}`\n"
                         f"  💼 **Hiring For:** `{roles}`\n"
-                        f"  👉 `/draft {p['id']}`"
+                        f"  👉 `/approve {p['id']}` • `/draft {p['id']}`"
                     )
                 embed.add_field(name="🎯 Latest Contacts Ready for Review", value="\n\n".join(preview_cards), inline=False)
 
-            embed.set_footer(text="Run /pending to review all candidate leads or /draft <id> to create outreach emails.")
+            embed.set_footer(text="Run /pending to review all candidate leads with 1-click Approve buttons.")
             await interaction.channel.send(embed=embed)
 
 
