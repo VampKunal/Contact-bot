@@ -65,32 +65,121 @@ class PipelineCog(commands.Cog):
             embed.add_field(name="➕ New Leads Added", value=str(funnel.get("leads_added", 0)), inline=True)
             embed.add_field(name="⏳ Pending Review Total", value=str(stats.get("contacts_pending", 0)), inline=True)
 
-            # Fetch top 3 pending contacts to give immediate actionable preview
-            from database.db import get_pending_contacts
-            from bot.cogs.review import infer_target_hiring_roles
-            
-            top_pending = await get_pending_contacts(limit=3)
-            if top_pending:
-                preview_cards = []
-                for p in top_pending:
-                    verified_icon = "✅ Verified" if p.get("email_verified") else "⚠️ Guessed"
-                    conf_val = p.get("llm_confidence")
-                    conf_str = f"{(conf_val * 100):.0f}%" if conf_val is not None else "Unrated"
-                    roles = infer_target_hiring_roles(p.get("title_normalized") or p.get("title"), p.get("tech_stack_match"))
-                    preview_cards.append(
-                        f"• **{p['name']}** — *{p.get('title_normalized') or p.get('title') or 'Lead'}*\n"
-                        f"  🏢 **Company:** {p.get('company_name')} (`{p.get('company_domain')}`)\n"
-                        f"  📬 **Email:** `{p.get('email')}` ({verified_icon}) • Score: `{conf_str}`\n"
-                        f"  💼 **Hiring For:** `{roles}`\n"
-                        f"  👉 `/approve {p['id']}` • `/draft {p['id']}`"
-                    )
-                embed.add_field(name="🎯 Latest Contacts Ready for Review", value="\n\n".join(preview_cards), inline=False)
-
-            embed.set_footer(text="Run /pending to review all candidate leads with 1-click Approve buttons.")
             await interaction.followup.send(embed=embed)
+
+            # Post interactive cards for newly added leads immediately
+            new_leads = results.get("newly_added_leads", [])
+            from bot.cogs.review import ContactActionView, infer_target_hiring_roles
+            from database.db import get_pending_contacts
+            
+            leads_to_post = list(new_leads[:20])
+            if len(leads_to_post) < 10:
+                more_pending = await get_pending_contacts(limit=10)
+                for p in more_pending:
+                    if p["id"] not in [l["id"] for l in leads_to_post] and len(leads_to_post) < 15:
+                        leads_to_post.append(p)
+
+            for lead in leads_to_post:
+                verified_badge = "✅ Verified Mailbox" if lead.get("email_verified") else "⚠️ Pattern-Guessed"
+                conf_val = lead.get("llm_confidence")
+                conf_str = f"{(conf_val * 100):.0f}%" if conf_val is not None else "Unrated"
+                clean_title = lead.get("title_normalized") or lead.get("title", "Engineering Leader")
+                roles = infer_target_hiring_roles(clean_title, lead.get("tech_stack_match"))
+
+                card = discord.Embed(
+                    title=f"🎯 Lead: {lead['name']} ({clean_title}) @ {lead.get('company_name', 'Tech Company')}",
+                    color=discord.Color.teal(),
+                    timestamp=datetime.datetime.now(datetime.timezone.utc)
+                )
+                card.add_field(name="🏢 Company", value=f"{lead.get('company_name')} (`{lead.get('company_domain')}`) • 📍 {lead.get('company_region', 'Delhi NCR')}", inline=False)
+                card.add_field(name="📬 Email", value=f"`{lead.get('email')}` ({verified_badge})", inline=True)
+                card.add_field(name="💼 Can Hire For", value=f"`{roles}`", inline=True)
+                card.add_field(name="🧠 Calibrated Score", value=f"**{conf_str}** — {lead.get('llm_reasoning') or 'Standard match'}", inline=False)
+                card.set_footer(text=f"Contact ID #{lead['id']} • Click Approve & Draft below or use /draft {lead['id']}")
+
+                view = ContactActionView(lead["id"])
+                await interaction.channel.send(embed=card, view=view)
+                await asyncio.sleep(0.3)
 
         except Exception as e:
             await interaction.followup.send(f"❌ Pipeline failed with error: `{str(e)}`")
+
+    @app_commands.command(name="blast", description="Rapid high-volume discovery: fetch 20-50 tech leads and verified emails immediately.")
+    @app_commands.describe(company="Optional specific company name or domain (e.g. Swiggy, Razorpay, Zepto)")
+    async def blast_cmd(self, interaction: discord.Interaction, company: Optional[str] = None):
+        await interaction.response.defer()
+        await interaction.followup.send(f"⚡ **Initiating High-Yield Blast Discovery** {'for ' + company if company else 'across top tech hubs'}...")
+        
+        from pipeline.contact_discovery import discover_raw_contacts, verify_survivor_contact_email
+        from pipeline.llm_validator import validate_contact_batch, calculate_calibrated_confidence
+        from database.db import add_company, add_contact, get_company_by_domain
+        from bot.cogs.review import ContactActionView, infer_target_hiring_roles
+
+        if company:
+            clean_dom = company.lower().replace("http://", "").replace("https://", "").strip().rstrip("/")
+            if "." not in clean_dom:
+                clean_dom = f"{clean_dom.replace(' ', '')}.com"
+            comp_name = company.split(".")[0].capitalize()
+            comp_id = await add_company(name=comp_name, domain=clean_dom, region="India", tier=1)
+            target_list = [{"id": comp_id, "name": comp_name, "domain": clean_dom, "region": "India"}]
+        else:
+            from database.db import get_uncontacted_companies, get_companies
+            target_list = await get_uncontacted_companies(limit=15)
+            if not target_list:
+                target_list = await get_companies()
+                target_list = target_list[:15]
+
+        raw_leads = []
+        for c in target_list:
+            leads = await discover_raw_contacts(c["id"], c["name"], c["domain"])
+            raw_leads.extend(leads)
+
+        validated = await validate_contact_batch(raw_leads)
+        survivors = [v for v in validated if v.get("is_llm_passed", True)]
+
+        posted_count = 0
+        for cand in survivors[:25]:
+            verified_cand = await verify_survivor_contact_email(cand)
+            confidence = calculate_calibrated_confidence(
+                llm_relevant=True,
+                llm_score=verified_cand.get("raw_llm_score", 0.8),
+                red_flags=verified_cand.get("red_flags", []),
+                email_verified=verified_cand.get("email_verified", False),
+                source_type=verified_cand.get("source", "scraped")
+            )
+            cid = await add_contact(
+                company_id=verified_cand["company_id"],
+                name=verified_cand["name"],
+                title=verified_cand.get("title"),
+                title_normalized=verified_cand.get("title_normalized"),
+                email=verified_cand.get("email"),
+                source=verified_cand.get("source", "blast_discovery"),
+                email_verified=verified_cand.get("email_verified", False),
+                llm_confidence=confidence,
+                llm_reasoning=verified_cand.get("llm_reasoning")
+            )
+            if cid:
+                posted_count += 1
+                verified_badge = "✅ Verified Mailbox" if verified_cand.get("email_verified") else "⚠️ Pattern-Guessed"
+                conf_str = f"{(confidence * 100):.0f}%"
+                roles = infer_target_hiring_roles(verified_cand.get("title_normalized") or verified_cand.get("title"), "GenAI / Full-Stack")
+
+                card = discord.Embed(
+                    title=f"🎯 Lead: {verified_cand['name']} ({verified_cand.get('title_normalized') or verified_cand.get('title')}) @ {verified_cand.get('company_name', 'Tech')}",
+                    color=discord.Color.teal(),
+                    timestamp=datetime.datetime.now(datetime.timezone.utc)
+                )
+                card.add_field(name="🏢 Company", value=f"{verified_cand.get('company_name')} (`{verified_cand.get('domain')}`)", inline=False)
+                card.add_field(name="📬 Email", value=f"`{verified_cand.get('email')}` ({verified_badge})", inline=True)
+                card.add_field(name="💼 Can Hire For", value=f"`{roles}`", inline=True)
+                card.add_field(name="🧠 Calibrated Score", value=f"**{conf_str}** — {verified_cand.get('llm_reasoning') or 'Standard match'}", inline=False)
+                card.set_footer(text=f"Contact ID #{cid} • Click Approve & Draft below or use /draft {cid}")
+
+                view = ContactActionView(cid)
+                await interaction.channel.send(embed=card, view=view)
+                await asyncio.sleep(0.3)
+
+        await interaction.channel.send(f"✅ **Blast Complete!** Successfully delivered **{posted_count} fresh verified leads** to this channel.")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PipelineCog(bot))

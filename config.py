@@ -23,9 +23,9 @@ class Config:
     # LLM Settings
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").lower()
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
     # Apollo Multi-Key Pool Settings
@@ -50,7 +50,8 @@ class Config:
         "Gurgaon, Haryana, India",
         "Noida, Uttar Pradesh, India",
         "Delhi, India",
-        "New Delhi, Delhi, India"
+        "New Delhi, Delhi, India",
+        "Bengaluru, Karnataka, India"
     ]
 
 
@@ -63,6 +64,9 @@ class Config:
     # Pipeline & Scheduling Settings
     SCHEDULE_CRON_HOUR: int = int(os.getenv("SCHEDULE_CRON_HOUR", "3"))  # 03:30 UTC = 9:00 AM IST
     SCHEDULE_CRON_MINUTE: int = int(os.getenv("SCHEDULE_CRON_MINUTE", "30"))
+    DAILY_COMPANIES_LIMIT: int = int(os.getenv("DAILY_COMPANIES_LIMIT", "40"))
+    MAX_CONTACTS_PER_COMPANY: int = int(os.getenv("MAX_CONTACTS_PER_COMPANY", "6"))
+    DISCORD_DAILY_POST_LIMIT: int = int(os.getenv("DISCORD_DAILY_POST_LIMIT", "30"))
 
     # Deduplication & Exclusions
     @property

@@ -8,17 +8,16 @@ from config import config
 logger = logging.getLogger("llm_validator")
 
 SYSTEM_PROMPT = """
-You are an expert recruitment and contact-intelligence validator.
-Your job is to evaluate a batch of candidate hiring contacts found for tech companies in Delhi/NCR/Noida/Gurgaon.
+You are an expert recruitment and corporate-intelligence researcher.
+Your job is to evaluate candidate technical leadership contacts for tech companies in India.
 
 For each contact in the batch, you must verify:
-1. Is this contact likely a CURRENT decision maker / hiring-relevant leader (CTO, VP Eng, Engineering Manager, Founder/Co-Founder, Tech Lead, Head of Engineering, HR / Talent Acquisition)?
-2. Department leadership personas (e.g. "Head of Engineering", "Chief Technology Officer", "Technical Hiring Lead") ARE VALID target decision-makers for cold outreach. Mark them as is_relevant_decision_maker: true.
-3. Flag STALE / FORMER employees (e.g. snippets mentioning "ex-", "former", "previously at", "left in 2023", "past:").
-4. Flag TITLE MISMATCHES (e.g. Sales, Marketing, Customer Support, Legal, Finance, or Interns matched as CTO).
-5. Flag NAME COLLISIONS (common names associated with completely different companies).
+1. Is this contact a relevant engineering / technical hiring leader (CTO, VP Eng, Engineering Manager, Founder, Co-Founder, Tech Lead, Head of Engineering, HR / Talent Acquisition Lead)?
+2. Mark valid leaders as is_relevant_decision_maker: true.
+3. Flag STALE / FORMER employees (e.g. snippets mentioning "ex-", "former", "past:").
+4. Flag TITLE MISMATCHES (e.g. Sales, Marketing, Customer Support, Legal).
 
-You MUST respond ONLY with a valid JSON list containing one object per candidate in this exact format:
+Respond ONLY with a valid JSON array:
 [
   {
     "id": 0,
@@ -27,88 +26,93 @@ You MUST respond ONLY with a valid JSON list containing one object per candidate
     "is_stale_or_former": false,
     "llm_score": 0.85,
     "title_normalized": "Normalized Clean Title (e.g. VP of Engineering)",
-    "red_flags": ["list of any red flags, or empty list"],
+    "red_flags": [],
     "reasoning": "Brief 1-sentence assessment rationale"
   }
 ]
 """
 
-async def call_groq_llm(prompt: str, max_retries: int = 3) -> Optional[str]:
-    """Invoke Groq free-tier LLM with exponential backoff retries."""
+_llm_semaphore = asyncio.Semaphore(1)
+
+async def call_groq_llm(prompt: str, system_prompt: Optional[str] = None, max_retries: int = 3) -> Optional[str]:
+    """Invoke Groq free-tier LLM with concurrency pacing and retry handling."""
     if not config.GROQ_API_KEY:
         logger.debug("GROQ_API_KEY is not set in configuration.")
         return None
     
     from groq import AsyncGroq
     client = AsyncGroq(api_key=config.GROQ_API_KEY)
-    
-    for attempt in range(max_retries):
-        try:
-            response = await client.chat.completions.create(
-                model=config.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"} if "llama-3" in config.GROQ_MODEL else None,
-                temperature=0.1,
-                timeout=20
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            wait_sec = (2 ** attempt) + 0.5
-            logger.warning(f"Groq API call attempt {attempt+1}/{max_retries} failed: {e}. Retrying in {wait_sec}s...")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(wait_sec)
-            else:
-                logger.error(f"Groq API call permanently failed after {max_retries} attempts: {e}")
-    return None
+    sys_prompt = system_prompt or SYSTEM_PROMPT
 
-async def call_gemini_llm(prompt: str, max_retries: int = 3) -> Optional[str]:
-    """Invoke Google Gemini free-tier LLM with exponential backoff retries."""
-    if not config.GEMINI_API_KEY:
-        logger.debug("GEMINI_API_KEY is not set in configuration.")
-        return None
+    models_to_try = [config.GROQ_MODEL, "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
     
-    from google import genai
-    client = genai.Client(api_key=config.GEMINI_API_KEY)
-    full_prompt = f"{SYSTEM_PROMPT}\n\nCandidate Batch to Validate:\n{prompt}"
-
-    for attempt in range(max_retries):
-        try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=config.GEMINI_MODEL,
-                    contents=full_prompt
+    async with _llm_semaphore:
+        for attempt in range(max_retries):
+            model = models_to_try[attempt % len(models_to_try)]
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=900,
+                    timeout=15
                 )
-            )
-            return response.text
-        except Exception as e:
-            wait_sec = (2 ** attempt) + 0.5
-            logger.warning(f"Gemini API attempt {attempt+1}/{max_retries} failed: {e}. Retrying in {wait_sec}s...")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(wait_sec)
-            else:
-                logger.error(f"Gemini API call failed after {max_retries} attempts: {e}")
+                msg = response.choices[0].message
+                content = msg.content or getattr(msg, "reasoning", None)
+                if content and not content.lower().startswith("i'm sorry") and not content.lower().startswith("i cannot"):
+                    await asyncio.sleep(0.5)  # Smooth rate pacing
+                    return content
+            except Exception as e:
+                logger.warning(f"Groq API attempt {attempt+1} with {model} failed: {e}")
+                await asyncio.sleep(1.0 * (attempt + 1))
+
     return None
+
+async def call_unified_llm(prompt: str, system_prompt: Optional[str] = None) -> Optional[str]:
+    """Unified router directing LLM queries with pacing."""
+    return await call_groq_llm(prompt, system_prompt=system_prompt)
 
 def clean_json_response(raw_text: str) -> List[Dict[str, Any]]:
-    """Extract and parse clean JSON list from LLM output."""
+    """Extract and parse clean JSON list from LLM output with auto-repair for trailing partial objects."""
     if not raw_text:
         return []
     try:
         text = raw_text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        elif text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
+        # Remove any reasoning/thinking tags
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        
+        # Strip markdown code blocks
+        if "```json" in text:
+            match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+        elif "```" in text:
+            match = re.search(r"```\s*(.*?)\s*```", text, re.DOTALL)
+            if match:
+                text = match.group(1).strip()
 
-        parsed = json.loads(text)
+        # Find first JSON array or object
+        json_match = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
+        if json_match:
+            text = json_match.group(1).strip()
+
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            # Attempt repair on truncated JSON list
+            if text.startswith("[") and not text.endswith("]"):
+                last_brace = text.rfind("}")
+                if last_brace != -1:
+                    repaired = text[:last_brace+1] + "]"
+                    parsed = json.loads(repaired)
+                else:
+                    return []
+            else:
+                return []
+
         if isinstance(parsed, list):
             return parsed
         elif isinstance(parsed, dict):
@@ -117,7 +121,7 @@ def clean_json_response(raw_text: str) -> List[Dict[str, Any]]:
                     return v
             return [parsed]
     except Exception as e:
-        logger.error(f"Failed to parse LLM JSON response: {e}. Raw content: {raw_text[:200]}")
+        logger.debug(f"Failed to parse LLM JSON response: {e}")
     return []
 
 def calculate_calibrated_confidence(
@@ -175,89 +179,85 @@ def calculate_calibrated_confidence(
 
 async def validate_contact_batch(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Fast, cheap LLM filter executed FIRST before any slow/risky SMTP checks.
+    Fast, cheap LLM filter executed in small chunks (10 candidates) to prevent token limit overflows.
     Evaluates candidate relevance, title normalization, and stale status.
     """
     if not candidates:
         return []
 
-    provider = config.LLM_PROVIDER.lower()
-    batch_summary = []
-    for idx, c in enumerate(candidates):
-        batch_summary.append({
-            "id": idx,
-            "name": c.get("name"),
-            "company": c.get("company_name"),
-            "domain": c.get("domain"),
-            "scraped_title": c.get("title"),
-            "source": c.get("source", "scraped"),
-            "snippet": c.get("raw_snippet", "")
-        })
-
-    prompt = f"Candidate Batch to Validate (Delhi NCR Tech Startups):\n{json.dumps(batch_summary, indent=2)}"
-
-    raw_response = None
-    if provider == "groq":
-        raw_response = await call_groq_llm(prompt)
-    elif provider == "gemini":
-        raw_response = await call_gemini_llm(prompt)
-    else:
-        raw_response = await call_groq_llm(prompt) or await call_gemini_llm(prompt)
-
-    validated_results = clean_json_response(raw_response) if raw_response else []
-
+    CHUNK_SIZE = 10
     enriched_candidates = []
-    for idx, original in enumerate(candidates):
-        llm_match = None
-        if idx < len(validated_results):
-            llm_match = validated_results[idx]
-        else:
-            for item in validated_results:
-                if item.get("name", "").lower() == original.get("name", "").lower():
-                    llm_match = item
-                    break
 
-        if llm_match:
-            is_relevant = llm_match.get("is_relevant_decision_maker", True)
-            is_stale = llm_match.get("is_stale_or_former", False)
-            raw_llm_score = float(llm_match.get("llm_score", 0.75))
-            
-            # Pass if deemed relevant OR if score is >= 0.40 and not explicitly a stale/former employee
-            passed = (is_relevant or raw_llm_score >= 0.40) and not is_stale
+    for chunk_start in range(0, len(candidates), CHUNK_SIZE):
+        chunk = candidates[chunk_start:chunk_start + CHUNK_SIZE]
+        batch_summary = []
+        for idx, c in enumerate(chunk):
+            batch_summary.append({
+                "id": idx,
+                "name": c.get("name"),
+                "company": c.get("company_name"),
+                "domain": c.get("domain"),
+                "scraped_title": c.get("title"),
+                "source": c.get("source", "scraped"),
+                "snippet": c.get("raw_snippet", "")
+            })
 
-            normalized_title = llm_match.get("title_normalized") or original.get("title")
-            red_flags = llm_match.get("red_flags", [])
-            if is_stale and "stale/former employee" not in red_flags:
-                red_flags.append("stale/former employee")
+        prompt = f"Candidate Batch to Validate (India Tech Startups):\n{json.dumps(batch_summary, indent=2)}"
 
-            reasoning = llm_match.get("reasoning", "")
-            if red_flags:
-                reasoning = f"Flags: {', '.join(red_flags)}. {reasoning}".strip()
+        raw_response = await call_unified_llm(prompt)
+        validated_results = clean_json_response(raw_response) if raw_response else []
 
-            enriched = {
-                **original,
-                "title_normalized": normalized_title,
-                "is_llm_passed": passed,
-                "raw_llm_score": raw_llm_score,
-                "red_flags": red_flags,
-                "llm_reasoning": reasoning,
-                "status": "pending"
-            }
-        else:
-            # Heuristic fallback if LLM is temporarily unreachable
-            title_lower = (original.get("title") or "").lower()
-            from pipeline.contact_discovery import is_hiring_relevant_title
-            passed = is_hiring_relevant_title(title_lower)
-            enriched = {
-                **original,
-                "title_normalized": original.get("title"),
-                "is_llm_passed": passed,
-                "raw_llm_score": 0.6 if passed else 0.3,
-                "red_flags": [] if passed else ["title relevance unverified"],
-                "llm_reasoning": "Heuristic title match (LLM unavailable)",
-                "status": "pending"
-            }
+        for idx, original in enumerate(chunk):
+            llm_match = None
+            if idx < len(validated_results):
+                llm_match = validated_results[idx]
+            else:
+                for item in validated_results:
+                    if item.get("name", "").lower() == original.get("name", "").lower():
+                        llm_match = item
+                        break
 
-        enriched_candidates.append(enriched)
+            if llm_match:
+                is_relevant = llm_match.get("is_relevant_decision_maker", True)
+                is_stale = llm_match.get("is_stale_or_former", False)
+                raw_llm_score = float(llm_match.get("llm_score", 0.75))
+                
+                # Pass if deemed relevant OR if score is >= 0.40 and not explicitly a stale/former employee
+                passed = (is_relevant or raw_llm_score >= 0.40) and not is_stale
+
+                normalized_title = llm_match.get("title_normalized") or original.get("title")
+                red_flags = llm_match.get("red_flags", [])
+                if is_stale and "stale/former employee" not in red_flags:
+                    red_flags.append("stale/former employee")
+
+                reasoning = llm_match.get("reasoning", "")
+                if red_flags:
+                    reasoning = f"Flags: {', '.join(red_flags)}. {reasoning}".strip()
+
+                enriched = {
+                    **original,
+                    "title_normalized": normalized_title,
+                    "is_llm_passed": passed,
+                    "raw_llm_score": raw_llm_score,
+                    "red_flags": red_flags,
+                    "llm_reasoning": reasoning,
+                    "status": "pending"
+                }
+            else:
+                # Heuristic fallback if LLM chunk temporarily timed out
+                title_lower = (original.get("title") or "").lower()
+                from pipeline.contact_discovery import is_hiring_relevant_title
+                passed = is_hiring_relevant_title(title_lower)
+                enriched = {
+                    **original,
+                    "title_normalized": original.get("title"),
+                    "is_llm_passed": passed,
+                    "raw_llm_score": 0.6 if passed else 0.3,
+                    "red_flags": [] if passed else ["title relevance unverified"],
+                    "llm_reasoning": "Heuristic title match",
+                    "status": "pending"
+                }
+
+            enriched_candidates.append(enriched)
 
     return enriched_candidates

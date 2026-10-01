@@ -116,10 +116,11 @@ async def scrape_companies_via_web_search(query: str, region_name: str) -> List[
                     if not domain:
                         continue
 
-                    # Extract clean company name
+                    # Clean company name
                     comp_name = raw_title.split("-")[0].split("|")[0].split(":")[0].strip()
-                    if len(comp_name) < 2 or len(comp_name) > 40:
-                        comp_name = domain.split(".")[0].capitalize()
+                    junk_keywords = ["top ", "best ", "list of", "companies in", "fastest growing", "it companies", "startups in", "review"]
+                    if any(jk in comp_name.lower() for jk in junk_keywords) or len(comp_name) < 2 or len(comp_name) > 30:
+                        comp_name = domain.split(".")[0].replace("-", " ").capitalize()
 
                     # Deduplication check against SQLite DB
                     existing = await get_company_by_domain(domain)
@@ -155,9 +156,73 @@ async def scrape_companies_via_web_search(query: str, region_name: str) -> List[
 
     return discovered
 
+async def discover_companies_via_llm(region_name: str) -> List[Dict[str, Any]]:
+    """
+    Autonomously generate real tech companies, AI startups, and SaaS product companies for target region.
+    """
+    from pipeline.llm_validator import call_unified_llm, clean_json_response
+    prompt = f"""
+Generate a list of 10-15 REAL, ACTIVE tech companies and high-growth startups headquartered or having engineering offices in {region_name}, India (Gurgaon, Noida, Delhi NCR, Bengaluru).
+Focus on: GenAI/LLM startups, AI Platforms, SaaS, FinTech, E-Commerce Tech, and Deep Tech product companies.
+
+Respond ONLY with a valid JSON array in this exact format:
+[
+  {{
+    "name": "Company Name",
+    "domain": "company.com",
+    "tech_stack": "GenAI, Python, React, AWS",
+    "tier": 1
+  }}
+]
+"""
+    sys_prompt = (
+        "You are an expert tech startup researcher for India tech hubs. "
+        "Your task is to identify real, active tech startups and product companies with valid domains."
+    )
+    discovered = []
+    try:
+        raw_res = await call_unified_llm(prompt, system_prompt=sys_prompt)
+        parsed = clean_json_response(raw_res) if raw_res else []
+        for item in parsed:
+            name = item.get("name", "").strip()
+            domain = clean_domain(item.get("domain", ""))
+            if not name or not domain:
+                continue
+            
+            existing = await get_company_by_domain(domain)
+            if existing:
+                continue
+
+            tier = item.get("tier", 1)
+            stack = item.get("tech_stack", "GenAI / Software Engineering")
+            
+            comp_id = await add_company(
+                name=name,
+                domain=domain,
+                region=region_name,
+                tier=tier,
+                source="llm_discovery",
+                tech_stack_match=stack
+            )
+            if comp_id:
+                discovered.append({
+                    "id": comp_id,
+                    "name": name,
+                    "domain": domain,
+                    "region": region_name,
+                    "tier": tier,
+                    "tech_stack_match": stack,
+                    "source": "llm_discovery"
+                })
+                logger.info(f"LLM Discovered Company: {name} ({domain}) in {region_name}")
+    except Exception as e:
+        logger.error(f"Error discovering companies via LLM for {region_name}: {e}")
+        
+    return discovered
+
 async def run_company_discovery(region_filter: Optional[str] = None) -> Dict[str, Any]:
     """
-    Fast, concurrent autonomous company discovery across target regions.
+    Fast, concurrent autonomous company discovery across target regions combining Web search & LLM intelligence.
     """
     regions = await get_regions(active_only=True)
     if region_filter:
@@ -168,11 +233,13 @@ async def run_company_discovery(region_filter: Optional[str] = None) -> Dict[str
         region_name = r["name"]
         prompts = [
             f"top AI startups {region_name} 2026",
-            f"fastest growing tech companies in {region_name}",
-            f"software product startups {region_name}"
+            f"fastest growing tech companies in {region_name}"
         ]
         for query in prompts:
             tasks.append(scrape_companies_via_web_search(query, region_name))
+        
+        # Parallel LLM company discovery
+        tasks.append(discover_companies_via_llm(region_name))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     all_discovered = []

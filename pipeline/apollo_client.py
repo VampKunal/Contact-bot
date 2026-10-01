@@ -164,10 +164,18 @@ async def search_apollo_decision_makers(
                                 "raw_snippet": f"{title} at {company_name} ({p.get('headline', '')})"
                             })
 
-                    elif resp.status in (429, 402, 403):
+                    elif resp.status in (429, 402):
                         logger.warning(f"Apollo Key #{key_idx+1} rate limit / credit exhaustion (HTTP {resp.status})")
                         # Mark daily cap reached for this key
                         await increment_apollo_credits(key_index=key_idx, amount=remaining_daily)
+                    elif resp.status == 403:
+                        err_text = await resp.text()
+                        logger.info(
+                            f"Apollo Key #{key_idx+1}: Free plan does not include People Search API. "
+                            f"(Note: Apollo requires a paid plan for people search API; using web search + LLM intelligence)."
+                        )
+                        # Do not fake credit exhaustion; just break
+                        break
                     else:
                         logger.error(f"Apollo API HTTP error {resp.status}: {await resp.text()}")
 
@@ -180,6 +188,24 @@ async def search_apollo_decision_makers(
         "status": "success" if collected_leads else "exhausted",
         "contacts": collected_leads
     }
+
+async def enrich_company_via_apollo(domain: str) -> Optional[Dict[str, Any]]:
+    """Enrich company data using Apollo free-tier organization endpoint."""
+    keys = config.APOLLO_KEYS
+    if not keys or not domain:
+        return None
+    api_key = keys[0]
+    url = f"https://api.apollo.io/v1/organizations/enrich?api_key={api_key}&domain={domain.lower().strip()}"
+    headers = {"Content-Type": "application/json", "X-Api-Key": api_key}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("organization")
+        except Exception as e:
+            logger.debug(f"Apollo org enrichment failed for {domain}: {e}")
+    return None
 
 async def query_apollo_for_company(
     company_name: str,
@@ -234,9 +260,11 @@ async def query_apollo_for_company(
                             "status": "pending"
                         })
                     return {"status": "success", "contacts": contacts_found}
-                elif resp.status in (429, 402, 403):
+                elif resp.status in (429, 402):
                     await increment_apollo_credits(key_index=key_idx, amount=5)
-                    return await query_apollo_for_company(company_name, domain, target_titles)
+                elif resp.status == 403:
+                    logger.debug("Apollo query_apollo_for_company: 403 on free plan.")
+                    return {"status": "unsupported_plan", "contacts": []}
         except Exception as e:
             logger.error(f"Error querying Apollo for {company_name}: {e}")
 

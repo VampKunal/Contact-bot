@@ -95,44 +95,8 @@ Target Recipient:
 Write a personalized cold outreach email draft for this contact.
 """
 
-    provider = config.LLM_PROVIDER.lower()
-    raw_response = None
-
-    if provider == "groq" and config.GROQ_API_KEY:
-        try:
-            from groq import AsyncGroq
-            client = AsyncGroq(api_key=config.GROQ_API_KEY)
-            resp = await client.chat.completions.create(
-                model=config.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": DRAFT_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"} if "llama-3" in config.GROQ_MODEL else None,
-                temperature=0.7,
-                timeout=20
-            )
-            raw_response = resp.choices[0].message.content
-        except Exception as e:
-            logger.error(f"Groq draft generation error: {e}")
-
-    elif provider == "gemini" and config.GEMINI_API_KEY:
-        try:
-            import asyncio
-            from google import genai
-            client = genai.Client(api_key=config.GEMINI_API_KEY)
-            full_prompt = f"{DRAFT_SYSTEM_PROMPT}\n\n{user_prompt}"
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=config.GEMINI_MODEL,
-                    contents=full_prompt
-                )
-            )
-            raw_response = resp.text
-        except Exception as e:
-            logger.error(f"Gemini draft generation error: {e}")
+    from pipeline.llm_validator import call_unified_llm
+    raw_response = await call_unified_llm(user_prompt, system_prompt=DRAFT_SYSTEM_PROMPT)
 
     subject = None
     body = None

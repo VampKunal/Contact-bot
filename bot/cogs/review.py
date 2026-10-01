@@ -243,6 +243,103 @@ class ReviewCog(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="export", description="Export all pending or approved verified contacts as a downloadable CSV list.")
+    @app_commands.describe(status="Filter by status: 'pending', 'approved', or 'all' (default: 'pending')")
+    async def export_cmd(self, interaction: discord.Interaction, status: str = "pending"):
+        await interaction.response.defer()
+        from database.db import get_db_connection
+        import io
+        import csv
+
+        db = await get_db_connection()
+        try:
+            query = """
+                SELECT c.id, c.name, c.title_normalized, c.title, c.email, c.email_verified, 
+                       c.llm_confidence, c.status, comp.name as company_name, comp.domain as company_domain,
+                       comp.region as company_region
+                FROM contacts c
+                JOIN companies comp ON c.company_id = comp.id
+            """
+            params = []
+            if status.lower() != "all":
+                query += " WHERE c.status = ?"
+                params.append(status.lower())
+            query += " ORDER BY c.llm_confidence DESC NULLS LAST, c.id DESC"
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        if not rows:
+            await interaction.followup.send(f"No contacts found with status '{status}'.", ephemeral=True)
+            return
+
+        # Generate CSV file in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["ID", "Name", "Title", "Company", "Domain", "Email", "Verified", "Calibrated Score", "Status"])
+        for r in rows:
+            writer.writerow([
+                r["id"],
+                r["name"],
+                r["title_normalized"] or r["title"],
+                r["company_name"],
+                r["company_domain"],
+                r["email"],
+                "Yes" if r["email_verified"] else "No",
+                f"{(r['llm_confidence']*100):.0f}%" if r["llm_confidence"] else "",
+                r["status"]
+            ])
+
+        output.seek(0)
+        file_data = discord.File(io.BytesIO(output.getvalue().encode("utf-8")), filename=f"contacts_{status}_{datetime.date.today()}.csv")
+
+        embed = discord.Embed(
+            title=f"📥 Contacts Export ({len(rows)} leads)",
+            description=f"Exported **{len(rows)} {status} contacts** ready for your email client or outreach tool.",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.add_field(name="📊 Total Contacts", value=str(len(rows)), inline=True)
+        embed.add_field(name="Filter", value=status.capitalize(), inline=True)
+        await interaction.followup.send(embed=embed, file=file_data)
+
+    @app_commands.command(name="approveall", description="Bulk approve top pending contacts and export pre-filled draft mailto links.")
+    @app_commands.describe(limit="Number of top pending contacts to approve (default: 10, max: 30)")
+    async def approveall_cmd(self, interaction: discord.Interaction, limit: int = 10):
+        await interaction.response.defer()
+        limit = min(30, max(1, limit))
+        pending_list = await get_pending_contacts(limit=limit)
+
+        if not pending_list:
+            await interaction.followup.send("No pending contacts to approve.", ephemeral=True)
+            return
+
+        approved_count = 0
+        summary_lines = []
+        for c in pending_list:
+            cid = c["id"]
+            ok = await update_contact_status(cid, "approved")
+            if ok:
+                approved_count += 1
+                draft_res = await generate_outreach_draft(c)
+                mailto = draft_res.get("mailto_url", "")
+                summary_lines.append(f"• **{c['name']}** ({c['company_name']}) — `{c.get('email')}` [👉 Send Email]({mailto})")
+
+        embed = discord.Embed(
+            title=f"⚡ Bulk Approved {approved_count} Contacts",
+            description="\n".join(summary_lines[:15]),
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        if len(summary_lines) > 15:
+            embed.set_footer(text=f"...and {len(summary_lines) - 15} more approved! Run /export status:approved to download all.")
+        else:
+            embed.set_footer(text="Click 'Send Email' on any lead to open pre-filled outreach email.")
+
+        await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReviewCog(bot))
+

@@ -43,7 +43,14 @@ DEFAULT_SEED_COMPANIES = [
     {"name": "OfBusiness", "domain": "ofbusiness.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Java, Spring, React, Cloud"},
     {"name": "Pristyn Care", "domain": "pristyncare.com", "region": "Gurgaon", "tier": 1, "tech_stack": "HealthTech, Python, React"},
     {"name": "Zepto", "domain": "zeptonow.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Quick Commerce, Node.js, Python, React"},
-    {"name": "Blinkit", "domain": "blinkit.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, Go, React, Distributed Systems"}
+    {"name": "Blinkit", "domain": "blinkit.com", "region": "Gurgaon", "tier": 1, "tech_stack": "Python, Go, React, Distributed Systems"},
+    {"name": "Razorpay", "domain": "razorpay.com", "region": "Bengaluru", "tier": 1, "tech_stack": "FinTech, Go, Node.js, React, AWS"},
+    {"name": "BrowserStack", "domain": "browserstack.com", "region": "Delhi NCR", "tier": 1, "tech_stack": "Developer Tools, Ruby, React, Node.js"},
+    {"name": "Postman", "domain": "postman.com", "region": "Bengaluru", "tier": 1, "tech_stack": "API Platform, Node.js, React, Electron"},
+    {"name": "Hasura", "domain": "hasura.io", "region": "Bengaluru", "tier": 1, "tech_stack": "GraphQL, Haskell, Go, React, Cloud"},
+    {"name": "PhysicsWallah", "domain": "pw.live", "region": "Noida", "tier": 1, "tech_stack": "EdTech, Node.js, React, Flutter, Microservices"},
+    {"name": "Meesho", "domain": "meesho.com", "region": "Bengaluru", "tier": 1, "tech_stack": "E-Commerce, Java, Python, Go, React"},
+    {"name": "Groww", "domain": "groww.in", "region": "Bengaluru", "tier": 1, "tech_stack": "FinTech, SpringBoot, Microservices, React"}
 ]
 
 # Global run state for /health and /status
@@ -94,12 +101,27 @@ async def run_full_pipeline(region_filter: Optional[str] = None) -> Dict[str, An
     for c in DEFAULT_SEED_COMPANIES:
         await add_company(name=c["name"], domain=c["domain"], region=c["region"], tier=c["tier"], tech_stack_match=c["tech_stack"])
 
-    # Target uncontacted companies from DB to ensure fresh leads every cycle
-    target_companies = await get_uncontacted_companies(limit=6, region=region_filter)
+    # Target companies: Prioritize newly discovered companies and least-contacted companies
+    company_limit = config.DAILY_COMPANIES_LIMIT
+    target_companies = []
+    
+    # Put newly discovered companies at front
+    for nc in new_comps:
+        if len(target_companies) < company_limit:
+            target_companies.append(nc)
+
+    # Fill remaining quota with database companies
+    remaining_limit = company_limit - len(target_companies)
+    if remaining_limit > 0:
+        db_uncontacted = await get_uncontacted_companies(limit=remaining_limit, region=region_filter)
+        for dc in db_uncontacted:
+            if dc["id"] not in [t["id"] for t in target_companies]:
+                target_companies.append(dc)
+
     if not target_companies:
         target_companies = await get_companies(region=region_filter)
 
-    funnel["companies_searched"] = min(len(target_companies), 6)
+    funnel["companies_searched"] = min(len(target_companies), company_limit)
     
     # Process target companies
     all_raw_leads: List[Dict[str, Any]] = []
@@ -110,7 +132,7 @@ async def run_full_pipeline(region_filter: Optional[str] = None) -> Dict[str, An
 
     # Scrape target companies in parallel batches
     scrape_tasks = []
-    for comp in target_companies[:6]:
+    for comp in target_companies[:company_limit]:
         scrape_tasks.append(discover_raw_contacts(comp["id"], comp["name"], comp["domain"]))
 
     scrape_results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
@@ -156,6 +178,7 @@ async def run_full_pipeline(region_filter: Optional[str] = None) -> Dict[str, An
     logger.info(f"LLM Filter: {len(survivors)}/{len(validated_candidates)} candidates survived.")
 
     # 4. Step 2: Targeted SMTP Verification SECOND on Survivors ONLY
+    newly_added_leads: List[Dict[str, Any]] = []
     for cand in survivors:
         comp_id = cand["company_id"]
         known_pattern = await get_company_email_pattern(comp_id)
@@ -194,6 +217,20 @@ async def run_full_pipeline(region_filter: Optional[str] = None) -> Dict[str, An
         )
         if contact_id:
             funnel["leads_added"] += 1
+            newly_added_leads.append({
+                "id": contact_id,
+                "company_id": comp_id,
+                "company_name": verified_cand.get("company_name", "Tech Company"),
+                "company_domain": verified_cand.get("domain", ""),
+                "company_region": verified_cand.get("region", "Delhi NCR"),
+                "name": verified_cand["name"],
+                "title": verified_cand.get("title"),
+                "title_normalized": verified_cand.get("title_normalized"),
+                "email": verified_cand.get("email"),
+                "email_verified": verified_cand.get("email_verified", False),
+                "llm_confidence": confidence,
+                "llm_reasoning": verified_cand.get("llm_reasoning")
+            })
 
     # Record last run metrics for /health
     last_pipeline_run["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -211,5 +248,6 @@ async def run_full_pipeline(region_filter: Optional[str] = None) -> Dict[str, An
     return {
         "new_companies_discovered": len(new_comps),
         "funnel": funnel,
-        "stats": stats
+        "stats": stats,
+        "newly_added_leads": newly_added_leads
     }

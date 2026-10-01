@@ -43,9 +43,26 @@ async def scheduled_daily_run(bot: discord.Client):
                     header_embed.set_footer(text="Click 'Approve & Draft' below on any lead to instantly generate a tailored outreach email!")
                     await channel.send(embed=header_embed)
 
-                    # 2. Post top pending leads with interactive Approve & Draft buttons
-                    latest_pending = await get_pending_contacts(limit=5)
-                    for lead in latest_pending:
+                    # 2. Post all newly discovered leads with interactive Approve & Draft buttons
+                    post_limit = config.DISCORD_DAILY_POST_LIMIT
+                    new_leads = results.get("newly_added_leads", [])
+                    
+                    # If we have newly added leads from today's run, prioritize them!
+                    leads_to_post = list(new_leads[:post_limit])
+                    
+                    # If fewer new leads than post limit, fetch remaining un-reviewed pending leads
+                    if len(leads_to_post) < post_limit:
+                        remaining_slots = post_limit - len(leads_to_post)
+                        already_ids = {l["id"] for l in leads_to_post}
+                        db_pending = await get_pending_contacts(limit=remaining_slots + len(already_ids))
+                        for p in db_pending:
+                            if p["id"] not in already_ids and len(leads_to_post) < post_limit:
+                                leads_to_post.append(p)
+                                already_ids.add(p["id"])
+
+                    logger.info(f"Delivering {len(leads_to_post)} high-priority leads to Discord channel...")
+                    
+                    for lead in leads_to_post:
                         verified_badge = "✅ Verified Mailbox" if lead.get("email_verified") else "⚠️ Pattern-Guessed"
                         conf_val = lead.get("llm_confidence")
                         conf_str = f"{(conf_val * 100):.0f}%" if conf_val is not None else "Unrated"
@@ -53,11 +70,11 @@ async def scheduled_daily_run(bot: discord.Client):
                         roles = infer_target_hiring_roles(clean_title, lead.get("tech_stack_match"))
 
                         card = discord.Embed(
-                            title=f"🎯 Lead: {lead['name']} ({clean_title}) @ {lead['company_name']}",
+                            title=f"🎯 Lead: {lead['name']} ({clean_title}) @ {lead.get('company_name', 'Tech Company')}",
                             color=discord.Color.teal(),
                             timestamp=datetime.datetime.now(datetime.timezone.utc)
                         )
-                        card.add_field(name="🏢 Company", value=f"{lead['company_name']} (`{lead.get('company_domain')}`) • 📍 {lead.get('company_region', 'Delhi NCR')}", inline=False)
+                        card.add_field(name="🏢 Company", value=f"{lead.get('company_name')} (`{lead.get('company_domain')}`) • 📍 {lead.get('company_region', 'Delhi NCR')}", inline=False)
                         card.add_field(name="📬 Email", value=f"`{lead.get('email')}` ({verified_badge})", inline=True)
                         card.add_field(name="💼 Can Hire For", value=f"`{roles}`", inline=True)
                         card.add_field(name="🧠 Calibrated Score", value=f"**{conf_str}** — {lead.get('llm_reasoning') or 'Standard match'}", inline=False)
@@ -65,6 +82,16 @@ async def scheduled_daily_run(bot: discord.Client):
 
                         view = ContactActionView(lead["id"])
                         await channel.send(embed=card, view=view)
+                        await asyncio.sleep(0.4)  # Smooth rate limiting
+
+                    # 3. If there are more pending leads than posted, send guidance note
+                    total_pending = stats.get("contacts_pending", 0)
+                    if total_pending > len(leads_to_post):
+                        more_embed = discord.Embed(
+                            description=f"📊 **{total_pending - len(leads_to_post)} more leads** are waiting in the queue! Use `/pending` to browse all pending leads or `/export` to download them.",
+                            color=discord.Color.blue()
+                        )
+                        await channel.send(embed=more_embed)
 
             except Exception as e:
                 logger.error(f"Error posting daily summary to Discord channel: {e}")
